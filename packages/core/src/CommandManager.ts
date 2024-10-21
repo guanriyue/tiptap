@@ -5,6 +5,9 @@ import { createChainableState } from './helpers/createChainableState.js'
 import {
   AnyCommands, CanCommands, ChainedCommands, CommandProps, SingleCommands,
 } from './types.js'
+import { isFunction } from './utilities/index.js'
+
+const alwaysReturnFalse = () => false as const
 
 export class CommandManager {
   editor: Editor
@@ -61,7 +64,7 @@ export class CommandManager {
   public createChain(startTr?: Transaction, shouldDispatch = true): ChainedCommands {
     const { rawCommands, editor, state } = this
     const { view } = editor
-    const callbacks: boolean[] = []
+    const callbacks: (boolean | 'commandError' | 'commandNotFound')[] = []
     const hasStartTransaction = !!startTr
     const tr = startTr || state.tr
 
@@ -71,6 +74,8 @@ export class CommandManager {
         && shouldDispatch
         && !tr.getMeta('preventDispatch')
         && !this.hasCustomState
+        && !callbacks.includes('commandError')
+        && !callbacks.includes('commandNotFound')
       ) {
         view.dispatch(tr)
       }
@@ -78,23 +83,37 @@ export class CommandManager {
       return callbacks.every(callback => callback === true)
     }
 
-    const chain = {
-      ...Object.fromEntries(
-        Object.entries(rawCommands).map(([name, command]) => {
-          const chainedCommand = (...args: never[]) => {
-            const props = this.buildProps(tr, shouldDispatch)
-            const callback = command(...args)(props)
+    const chain = new Proxy({} as ChainedCommands, {
+      get: (_, prop: keyof ChainedCommands, receiver) => {
+        if (prop === 'run') {
+          return run
+        }
 
-            callbacks.push(callback)
+        const command = Reflect.get(rawCommands, prop, receiver)
+
+        const chainedCommand = (...args: never[]) => {
+          const props = this.buildProps(tr, shouldDispatch)
+
+          if (!isFunction(command)) {
+            callbacks.push('commandNotFound')
 
             return chain
           }
 
-          return [name, chainedCommand]
-        }),
-      ),
-      run,
-    } as unknown as ChainedCommands
+          try {
+            const callback = command(...args)(props)
+
+            callbacks.push(callback)
+          } catch {
+            callbacks.push('commandError')
+          }
+
+          return chain
+        }
+
+        return chainedCommand
+      },
+    })
 
     return chain
   }
@@ -104,16 +123,36 @@ export class CommandManager {
     const dispatch = false
     const tr = startTr || state.tr
     const props = this.buildProps(tr, dispatch)
-    const formattedCommands = Object.fromEntries(
-      Object.entries(rawCommands).map(([name, command]) => {
-        return [name, (...args: never[]) => command(...args)({ ...props, dispatch: undefined })]
-      }),
-    ) as unknown as SingleCommands
 
-    return {
-      ...formattedCommands,
-      chain: () => this.createChain(tr, dispatch),
-    } as CanCommands
+    return new Proxy({} as CanCommands, {
+      get: (_, prop: keyof CanCommands, receiver) => {
+        if (prop === 'chain') {
+          return () => this.createChain(tr, dispatch)
+        }
+
+        const command = Reflect.get(rawCommands, prop, receiver)
+
+        if (!isFunction(command)) {
+          return alwaysReturnFalse
+        }
+
+        return (...args: any[]) => {
+          try {
+            return command(...args)({ ...props, dispatch: undefined })
+          } catch {
+            // If a command execution will result in an exception,
+            // then that command should not be executed.
+            return false
+          }
+        }
+      },
+      ownKeys: () => {
+        return Object.keys(rawCommands).concat('chain')
+      },
+      has: (_, prop) => {
+        return prop === 'chain' || prop in rawCommands
+      },
+    })
   }
 
   public buildProps(tr: Transaction, shouldDispatch = true): CommandProps {

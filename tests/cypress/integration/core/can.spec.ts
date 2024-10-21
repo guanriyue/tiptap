@@ -1,6 +1,6 @@
 /// <reference types="cypress" />
 
-import { Editor } from '@tiptap/core'
+import { Editor, Extension } from '@tiptap/core'
 import Bold from '@tiptap/extension-bold'
 import Code from '@tiptap/extension-code'
 import CodeBlock from '@tiptap/extension-code-block'
@@ -8,8 +8,34 @@ import Document from '@tiptap/extension-document'
 import History from '@tiptap/extension-history'
 import Paragraph from '@tiptap/extension-paragraph'
 import Text from '@tiptap/extension-text'
+import StarterKit from '@tiptap/starter-kit'
+
+declare module '@tiptap/core' {
+  interface Commands<ReturnType> {
+    __errorCommandCheck__: {
+      /**
+       * A command for test.
+       * @internal
+       * @throws always throw an error when called.
+       */
+      throwErrorIfCalled: () => ReturnType,
+    }
+  }
+}
 
 describe('can', () => {
+  const ErrorCommandExtension = Extension.create({
+    addCommands() {
+      return {
+        throwErrorIfCalled: () => {
+          return (): boolean => {
+            throw new Error('I am a test error')
+          }
+        },
+      }
+    },
+  })
+
   it('not undo', () => {
     const editor = new Editor({
       extensions: [Document, Paragraph, Text, History],
@@ -194,5 +220,21 @@ describe('can', () => {
     expect(capturedOuterDispatch).to.be.undefined
     // eslint-disable-next-line no-unused-expressions
     expect(capturedInnerDispatch).to.be.undefined
+  })
+
+  it('return false if a command throws an exception', () => {
+    const editor = new Editor({
+      extensions: [StarterKit, ErrorCommandExtension],
+      content: '<p>tiptap</p>',
+      autofocus: 'start',
+    })
+
+    // eslint-disable-next-line no-unused-expressions
+    expect(editor.can().throwErrorIfCalled()).to.be.false
+    // eslint-disable-next-line no-unused-expressions
+    expect(editor.can().chain().throwErrorIfCalled().run()).to.be.false
+    // eslint-disable-next-line no-unused-expressions
+    expect(editor.can().chain().throwErrorIfCalled().toggleHeading({ level: 1 })
+      .run()).to.be.false
   })
 })
